@@ -1,0 +1,10 @@
+# Alpaca REST server and its /setup page.
+flask>=3.0
+
+# USB serial link to the controller, and the port enumeration auto-detection uses.
+# Imported lazily by transport.py and discovery.py so the package, its tests and the
+# simulator all work on a machine without it.
+pyserial>=3.5
+
+# Tests only:
+#   pytest
