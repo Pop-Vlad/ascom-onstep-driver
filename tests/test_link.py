@@ -51,11 +51,11 @@ def wait_until(predicate, timeout=5.0, message="condition never held"):
 def test_connect_identifies_the_mount_and_reads_its_capabilities(mount):
 	info = mount.info
 	assert info.product == "On-Step"
-	assert info.firmware_version == "3.16q"
+	assert info.firmware_version == "10.23a"
 	assert info.mount_type is p.MountType.GEM
 	assert info.is_gem is True
 	assert info.coordinate_mode is p.CoordinateMode.TOPOCENTRIC
-	assert info.is_onstepx is False
+	assert info.is_onstepx is True  # 10.x
 	assert "GEM" in info.description
 
 

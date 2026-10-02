@@ -1,7 +1,8 @@
 """OnStep's LX200-derived serial protocol: command framing, reply shapes, coordinates.
 
-Read out of the OnStep 3.16q firmware source, because the details that bite are all in
-the source:
+Read out of the firmware source for OnStepX 10.x (the primary target) and OnStep 4.24,
+because the details that bite are all in the source. Both were checked: the reply
+framing and the coordinate length rules are identical between them.
 
   * A reply's shape is a property of the command, not of the data (``Command.ino``
     ~2100). Nothing in the byte stream says which is coming, so ``ReplyShape`` is
@@ -528,20 +529,28 @@ RESET_AT_HOME = Cmd(":hF#", ReplyShape.NONE)
 
 # -- guiding
 MAX_PULSE_GUIDE_MS = 16399
-"""Command.ino ~1225 rejects anything above this outright."""
+"""Classic OnStep's hard ceiling -- 4.24 rejects anything above this outright
+(``Command.ino:1308``). OnStepX has no such limit; its handler only requires >= 0."""
+
+MAX_PULSE_GUIDE_MS_ONSTEPX = 60_000
+"""A driver-imposed bound for OnStepX, which would otherwise accept any duration.
+
+Not a firmware limit but a safety one: ``GUIDE_TIME_LIMIT`` defaults to 0 (disabled), so
+an over-long pulse is unattended motion. Far beyond anything PHD2 sends.
+"""
 
 _GUIDE_DIRECTION_CHARS = {0: "n", 1: "s", 2: "e", 3: "w"}
 """ASCOM GuideDirections: North=0, South=1, East=2, West=3."""
 
 
-def pulse_guide(direction: int, duration_ms: int) -> Cmd:
+def pulse_guide(direction: int, duration_ms: int, limit_ms: int = MAX_PULSE_GUIDE_MS) -> Cmd:
 	"""``:MGd[n]#`` -- the uppercase form, which answers 0/1."""
 	try:
 		char = _GUIDE_DIRECTION_CHARS[direction]
 	except KeyError:
 		raise ValueError(f"not an ASCOM guide direction: {direction}") from None
-	if not 0 <= duration_ms <= MAX_PULSE_GUIDE_MS:
-		raise ValueError(f"pulse duration {duration_ms} ms outside 0..{MAX_PULSE_GUIDE_MS}")
+	if not 0 <= duration_ms <= limit_ms:
+		raise ValueError(f"pulse duration {duration_ms} ms outside 0..{limit_ms}")
 	return Cmd(f":MG{char}{duration_ms:04d}#", ReplyShape.BOOLEAN)
 
 
@@ -566,7 +575,12 @@ def guide_rate_index_to_sidereal(index: int) -> float | None:
 
 
 GET_PULSE_GUIDE_RATE = Cmd(":GX90#", ReplyShape.OPTIONAL)
-"""Pulse-guide rate as a multiple of sidereal, straight from the mount."""
+"""Pulse-guide rate as a multiple of sidereal.
+
+Trustworthy on both supported firmwares, which enable a separate pulse rate by default
+(4.24 ``Validate.h:142``, OnStepX ``Config.defaults.h:819``). The ``:GU#`` digit agrees
+and costs nothing extra, so that is what the driver reads.
+"""
 
 GET_MAX_RATE_CURRENT = Cmd(":GX92#", ReplyShape.OPTIONAL)
 """Current ``MaxRate`` in microseconds per step -- the fastest the axes can be driven."""

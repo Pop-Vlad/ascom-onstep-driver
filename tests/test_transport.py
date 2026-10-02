@@ -119,7 +119,7 @@ def test_probe_identifies_onstep(link):
 	identity = t.probe(link)
 	assert identity is not None
 	assert identity["product"] == "On-Step"
-	assert identity["version"] == "3.16q"
+	assert identity["version"] == "10.23a"
 
 
 def test_probe_accepts_onstepx_naming():

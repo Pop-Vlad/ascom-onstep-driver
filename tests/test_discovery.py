@@ -87,7 +87,7 @@ def test_probe_target_identifies_a_mount():
 	found = d.probe_target(d.SerialTarget("COM3", 9600), opener=world.opener)
 	assert found is not None
 	assert found.product == "On-Step"
-	assert found.firmware_version == "3.16q"
+	assert found.firmware_version == "10.23a"
 	assert "COM3 at 9600 baud" in found.describe()
 
 

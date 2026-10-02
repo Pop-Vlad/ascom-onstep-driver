@@ -500,12 +500,21 @@ def test_guiding_is_not_slewing(scope):
 	assert scope.slewing is False
 
 
-def test_pulse_guide_rejects_a_duration_the_firmware_cannot_take(scope):
-	with pytest.raises(errors.InvalidValueError) as excinfo:
-		scope.pulse_guide(GuideDirection.NORTH, p.MAX_PULSE_GUIDE_MS + 1)
-	assert "16399" in str(excinfo.value)
-	with pytest.raises(errors.InvalidValueError):
-		scope.pulse_guide(GuideDirection.NORTH, -1)
+def test_pulse_guide_rejects_a_duration_the_firmware_cannot_take():
+	"""Classic OnStep 4.24 refuses anything over 16399 ms (Command.ino:1308)."""
+	from onstep_alpaca.simulator import OnStepSimulator
+
+	classic, _ = make(OnStepSimulator(firmware_version="4.24s", slew_rate_deg_s=2000.0))
+	classic.connected = True
+	try:
+		assert classic._pulse_guide_limit_ms == p.MAX_PULSE_GUIDE_MS
+		with pytest.raises(errors.InvalidValueError) as excinfo:
+			classic.pulse_guide(GuideDirection.NORTH, p.MAX_PULSE_GUIDE_MS + 1)
+		assert "16399" in str(excinfo.value)
+		with pytest.raises(errors.InvalidValueError):
+			classic.pulse_guide(GuideDirection.NORTH, -1)
+	finally:
+		classic.connected = False
 
 
 def test_pulse_guide_rejects_a_bad_direction(scope):
@@ -551,16 +560,6 @@ def test_move_axis_drives_then_stops(scope):
 	wait_until(lambda: scope.slewing is False)
 
 
-def test_move_axis_issues_direction_before_rate(scope):
-	"""customGuideRateAxis1 refuses unless a guide direction is already set, so the reverse
-	order silently leaves the mount at whatever :Rn# rate was last selected."""
-	scope.tracking = True
-	scope.sim.log.clear()
-	scope.move_axis(Axis.PRIMARY, 0.25)
-	sent = [c for c in scope.sim.log if c.startswith((":Mw", ":Me", ":RA"))]
-	assert sent[:2] == [":Mw#", ":RA0.250000#"], sent
-
-
 def test_move_axis_sign_picks_the_direction_not_a_negative_rate(scope):
 	""":RA# clamps anything below 0.001 arcsec/s *up*, so a negative rate would become a tiny
 	positive one -- the sign has to become a direction command."""
@@ -568,7 +567,7 @@ def test_move_axis_sign_picks_the_direction_not_a_negative_rate(scope):
 	scope.sim.log.clear()
 	scope.move_axis(Axis.PRIMARY, -0.25)
 	sent = [c for c in scope.sim.log if c.startswith((":Mw", ":Me", ":RA"))]
-	assert sent[0] == ":Me#"
+	assert ":Me#" in sent and ":Mw#" not in sent
 	assert all("-" not in command for command in sent), sent
 
 
@@ -577,7 +576,7 @@ def test_move_axis_on_the_secondary_axis(scope):
 	scope.sim.log.clear()
 	scope.move_axis(Axis.SECONDARY, 0.25)
 	sent = [c for c in scope.sim.log if c.startswith((":Mn", ":Ms", ":RE"))]
-	assert sent[:2] == [":Mn#", ":RE0.250000#"], sent
+	assert sent[:3] == [":RE0.250000#", ":Mn#", ":RE0.250000#"], sent
 	scope.move_axis(Axis.SECONDARY, 0.0)
 
 
@@ -767,3 +766,82 @@ def test_abort_slew_still_works_when_not_parked(scope):
 	scope.tracking = True
 	scope.abort_slew()  # must not raise
 	scope.move_axis(Axis.PRIMARY, 0.0)  # nor this
+
+
+def test_move_axis_sends_the_rate_on_both_sides_of_the_direction(scope):
+	"""The two firmware lines disagree about the order: OnStepX's :RA# only selects a
+	custom rate and startAxis1 resolves it once at start, so the rate must come first;
+	classic OnStep's customGuideRateAxis1 refuses unless a direction is already set, so
+	it needs the rate last. Sending it either side works on both."""
+	scope.tracking = True
+	scope.sim.log.clear()
+	scope.move_axis(Axis.PRIMARY, 0.25)
+	sent = [c for c in scope.sim.log if c.startswith((":Mw", ":Me", ":RA"))]
+	assert sent[:3] == [":RA0.250000#", ":Mw#", ":RA0.250000#"], sent
+	scope.move_axis(Axis.PRIMARY, 0.0)
+
+
+def test_onstepx_is_detected_from_the_major_version(scope):
+	"""OnStepX reports product "On-Step" too, so only the version distinguishes it --
+	a real HM-17PE reports 'On-Step' / '10.23a'."""
+	from onstep_alpaca.link import MountLink
+	from onstep_alpaca.simulator import OnStepSimulator, SimulatedTransport
+
+	for product, version, expected in (
+			("On-Step", "10.23a", True),  # a real OnStepX mount
+			("On-Step", "3.16q", False),  # classic
+			("OnStepX", "10.0", True),
+	):
+		link = MountLink(
+			SimulatedTransport(
+				OnStepSimulator(product_name=product, firmware_version=version)
+			),
+			poll_interval=0.05,
+		)
+		link.connect()
+		try:
+			assert link.info.is_onstepx is expected, f"{product} {version}"
+		finally:
+			link.disconnect()
+
+
+def test_the_pulse_guide_limit_follows_the_firmware(scope):
+	"""4.24 rejects anything over 16399 ms outright (Command.ino:1308); OnStepX has no
+	firmware limit, so the driver imposes its own rather than allow unattended motion."""
+	from onstep_alpaca.link import MountLink
+	from onstep_alpaca.simulator import OnStepSimulator, SimulatedTransport
+
+	# Classic: capped at the firmware's own ceiling.
+	classic, _ = make(OnStepSimulator(firmware_version="4.24s", slew_rate_deg_s=2000.0))
+	classic.connected = True
+	try:
+		assert classic._pulse_guide_limit_ms == p.MAX_PULSE_GUIDE_MS
+	finally:
+		classic.connected = False
+
+	# OnStepX: a larger, driver-imposed bound -- still bounded.
+	onstepx = Telescope(lambda: MountLink(
+		SimulatedTransport(OnStepSimulator(firmware_version="10.23a",
+		                                   slew_rate_deg_s=2000.0)),
+		poll_interval=0.05))
+	onstepx.connected = True
+	try:
+		assert onstepx._pulse_guide_limit_ms == p.MAX_PULSE_GUIDE_MS_ONSTEPX
+		assert p.MAX_PULSE_GUIDE_MS_ONSTEPX > p.MAX_PULSE_GUIDE_MS
+		# A duration 4.24 would refuse is accepted here...
+		assert p.pulse_guide(0, 20000, p.MAX_PULSE_GUIDE_MS_ONSTEPX).text == ":MGn20000#"
+		# ...but it is still bounded.
+		with pytest.raises(errors.InvalidValueError):
+			onstepx.pulse_guide(GuideDirection.NORTH,
+			                    p.MAX_PULSE_GUIDE_MS_ONSTEPX + 1)
+	finally:
+		onstepx.connected = False
+
+
+def test_park_waits_for_a_terminal_state_not_merely_not_parking(scope):
+	"""Waiting for "not PARKING" races the transition *into* it: the status still reads
+	NOT_PARKED when the first sample lands, so the wait falls through and the caller is
+	told parking finished before the mount started. Seen on real hardware."""
+	scope.set_park()
+	scope.park()
+	assert scope.at_park is True, "park() returned before the mount was parked"

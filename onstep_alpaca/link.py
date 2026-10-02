@@ -12,6 +12,7 @@ from __future__ import annotations
 import enum
 import logging
 import queue
+import re
 import threading
 import time
 from dataclasses import dataclass, replace
@@ -274,9 +275,9 @@ class MountLink:
 			raise request.error
 		return request.results
 
-	def pulse_guide(self, direction: int, duration_ms: int) -> None:
+	def pulse_guide(self, direction: int, duration_ms: int,limit_ms: int = protocol.MAX_PULSE_GUIDE_MS) -> None:
 		"""Issue a guide pulse and start the local ``IsPulseGuiding`` clock."""
-		cmd = protocol.pulse_guide(direction, duration_ms)
+		cmd = protocol.pulse_guide(direction, duration_ms, limit_ms)
 		self.execute(cmd)
 		self._pulse_deadline = time.monotonic() + duration_ms / 1000.0
 
@@ -419,7 +420,9 @@ class MountLink:
 		"""Read the fixed properties once, so nothing has to ask again later."""
 		product = identity.get("product", "OnStep")
 		version = identity.get("version", "unknown")
-		is_onstepx = "onstepx" in product.lower().replace(" ", "").replace("-", "")
+		flat = product.lower().replace(" ", "").replace("-", "")
+		major = re.match(r"\s*(\d+)", version)
+		is_onstepx = "onstepx" in flat or (major is not None and int(major.group(1)) >= 10)
 
 		status = protocol.parse_status(self._raw_exchange(protocol.GET_STATUS))
 

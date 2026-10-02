@@ -166,6 +166,7 @@ class Telescope:
 		# Cached capability answers, filled at connect.
 		self._max_axis_rate = FALLBACK_MAX_AXIS_RATE
 		self._never_flips = False
+		self._pulse_guide_limit_ms = protocol.MAX_PULSE_GUIDE_MS
 
 	# -- connection --------------------------------------------------------------
 
@@ -223,6 +224,12 @@ class Telescope:
 				log.debug("could not read extended pier side: %s", exc)
 
 		self._max_axis_rate = self._compute_max_axis_rate(link)
+		# 4.24 rejects pulses over 16399 ms; OnStepX has no firmware limit, so the driver
+		# imposes its own rather than allow unattended motion.
+		self._pulse_guide_limit_ms = (
+			protocol.MAX_PULSE_GUIDE_MS_ONSTEPX if link.info.is_onstepx
+			else protocol.MAX_PULSE_GUIDE_MS
+		)
 
 		try:
 			reply = link.execute(protocol.GET_TRACKING_RATE)
@@ -647,12 +654,13 @@ class Telescope:
 			) from None
 		if duration_ms < 0:
 			raise errors.InvalidValueError("guide duration cannot be negative")
-		if duration_ms > protocol.MAX_PULSE_GUIDE_MS:
-			raise errors.InvalidValueError(f"OnStep accepts pulses up to {protocol.MAX_PULSE_GUIDE_MS} ms; "
-			                               f"{duration_ms} ms was requested")
+		limit = self._pulse_guide_limit_ms
+		if duration_ms > limit:
+			raise errors.InvalidValueError(
+				f"this mount accepts pulses up to {limit} ms; {duration_ms} ms was requested")
 		link = self._require_link()
 		try:
-			link.pulse_guide(direction, duration_ms)
+			link.pulse_guide(direction, duration_ms, limit_ms=limit)
 		except CommandRejected as exc:
 			raise _rejection_to_ascom(exc) from exc
 		except LinkError as exc:
@@ -770,7 +778,9 @@ class Telescope:
 				protocol.MOVE_NORTH if rate_deg_per_sec > 0 else protocol.MOVE_SOUTH
 			)
 			rate_cmd = protocol.move_axis2_at_rate(abs(rate_deg_per_sec))
-		self._run(direction, rate_cmd, motion=Motion.START)
+		# With OnStepX the rate must come first. Classic OnStep's it needs the rate last.
+		# Sending it either side satisfies both without trusting the version.
+		self._run(rate_cmd, direction, rate_cmd, motion=Motion.START)
 		self._moving_axes.add(int(axis))
 
 	# -- park and home -----------------------------------------------------------
@@ -780,12 +790,17 @@ class Telescope:
 		if self.at_park:
 			return
 		self._run(protocol.PARK, motion=Motion.START)
-		self._wait_for(lambda: self._state().status.park is not ParkState.PARKING)
+		# Wait for a TERMINAL state.
+		self._wait_for(
+			lambda: self._state().status.park
+			        in (ParkState.PARKED, ParkState.PARK_FAILED)
+		)
 		if self._state().status.park is ParkState.PARK_FAILED:
 			raise errors.DriverError("the mount reported that parking failed")
 
 	def unpark(self) -> None:
 		"""Take the mount out of the parked state. Succeeds silently if it is not parked."""
+		# A no-op rather than a refusal.
 		if not self.at_park:
 			return
 		self._run(protocol.UNPARK, settle=True)

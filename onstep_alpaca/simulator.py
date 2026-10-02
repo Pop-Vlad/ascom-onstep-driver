@@ -67,7 +67,7 @@ class OnStepSimulator:
 
 	def __init__(self, mount_type: str = "E", latitude: float = 45.0, longitude: float = 25.0,
 	             slew_rate_deg_s: float = DEFAULT_SLEW_DEG_PER_S, coordinate_mode: int = 1,
-	             firmware_version: str = "3.16q", product_name: str = "On-Step",
+	             firmware_version: str = "10.23a", product_name: str = "On-Step",
 	             park_position: tuple[float, float] | None = (0.0, 60.0), utc: "dt.datetime | None" = None):
 		self.mount_type = mount_type
 		self.latitude = latitude
