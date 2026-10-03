@@ -96,6 +96,9 @@ class OnStepSimulator:
 		# A real OnStep persists its park position in EEPROM. Starting with None made
 		# CanPark true while every Park failed, which no configured mount ever is.
 		self.park_position: tuple[float, float] | None = park_position
+		#: OnStepX refuses :hR# with CE_SLEW_ERR_UNSPECIFIED while its startup position is
+		#: untrusted -- a generic code with a specific meaning (Park.cpp:211).
+		self.startup_authority_trusted = True
 
 		self.slew_rate_index = 5
 		self.guide_rate_index = 2
@@ -289,9 +292,10 @@ class OnStepSimulator:
 			out.append("/")  # PEC ignored
 		out.append(self.mount_type)
 		out.append(self.pier_side.value)
-		out.append(str(self.pulse_guide_rate_index))
-		out.append(str(self.guide_rate_index))
-		out.append(str(self.general_error))
+		# The firmware writes these as a raw offset from '0', so 10 and up are ':', ';', ...
+		out.append(chr(ord("0") + self.pulse_guide_rate_index))
+		out.append(chr(ord("0") + self.guide_rate_index))
+		out.append(chr(ord("0") + self.general_error))
 		return "".join(out)
 
 	# -- dispatch ----------------------------------------------------------------
@@ -655,7 +659,10 @@ class OnStepSimulator:
 			self._set_guide_rate({"G": 2, "C": 5, "M": 6, "F": 7, "S": 9}[rest])
 			return b""
 		if rest.startswith("A") or rest.startswith("E"):
-			return b""  # guide rate set, no reply
+			# A custom rate, which the firmware records as GR_CUSTOM on that axis -- and
+			# then reports in :GU# as ':'. Modelling it is what caught the parse bug.
+			self.guide_rate_index = protocol.GUIDE_RATE_CUSTOM_INDEX
+			return b""  # no reply
 		return self._fail(protocol.CommandError.CMD_UNKNOWN)
 
 	# -- :h* home and park -------------------------------------------------------
@@ -678,6 +685,8 @@ class OnStepSimulator:
 			self.slewing = True
 			return self._ok()
 		if rest == "R":
+			if not self.startup_authority_trusted:
+				return self._fail(protocol.CommandError.GOTO_ERR_UNSPECIFIED)
 			if self.park_state is not protocol.ParkState.PARKED:
 				return self._fail(protocol.CommandError.NOT_PARKED)
 			self.park_state = protocol.ParkState.NOT_PARKED

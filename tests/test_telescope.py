@@ -14,9 +14,12 @@ import time
 import pytest
 
 from onstep_alpaca import errors, protocol as p
-from onstep_alpaca.link import MountLink
+from onstep_alpaca.link import Motion, MountLink
 from onstep_alpaca.simulator import OnStepSimulator, SimulatedTransport
 from onstep_alpaca.telescope import (
+	_UNPARK_REJECTIONS,
+	SIDEREAL_DEG_PER_SEC,
+	_rejection_to_ascom,
 	AlignmentMode,
 	AscomPierSide,
 	Axis,
@@ -845,3 +848,107 @@ def test_park_waits_for_a_terminal_state_not_merely_not_parking(scope):
 	scope.set_park()
 	scope.park()
 	assert scope.at_park is True, "park() returned before the mount was parked"
+
+
+# --------------------------------------------------------------------------------------
+# Disconnect must not leave the mount moving
+
+
+def test_disconnect_stops_a_move_axis(scope):
+	"""MoveAxis runs until something halts it, and GUIDE_TIME_LIMIT is 0 on some builds, so
+	a client that drops mid-move would otherwise leave the mount driving into a limit."""
+	sim = scope.sim
+	scope.move_axis(Axis.SECONDARY, 0.5)
+	assert sim._moving
+	scope.connected = False
+	assert ":Q#" in sim.log
+	assert not sim._moving
+
+
+def test_disconnect_sends_nothing_when_the_mount_is_idle(scope):
+	sim = scope.sim
+	scope.connected = False
+	assert ":Q#" not in sim.log
+
+
+def test_disconnect_does_not_cancel_a_park_in_progress():
+	"""The one motion to leave alone: :Q# calls goTo.abort(), so stopping here would abandon
+	the mount halfway to its park position rather than protect it."""
+	# A park position several degrees away at 2 deg/s, so the park is still running when
+	# the client drops. park() is synchronous, so start it through the link instead.
+	scope, sim = make(OnStepSimulator(slew_rate_deg_s=2.0, park_position=(12.0, 40.0)))
+	scope.connected = True
+	try:
+		link = scope._require_link()
+		link.execute(p.PARK, motion=Motion.START)
+		wait_until(lambda: link.refresh().status.park is p.ParkState.PARKING)
+	finally:
+		scope.connected = False
+	assert ":Q#" not in sim.log
+	assert sim.park_state is p.ParkState.PARKING
+
+
+# --------------------------------------------------------------------------------------
+# Unpark refusals carry the reason the firmware actually means
+
+
+def test_untrusted_startup_authority_is_explained_not_reported_as_a_goto_error():
+	"""OnStepX refuses :hR# with CE_SLEW_ERR_UNSPECIFIED when it does not trust where it is
+	parked. The generic text for that code is "goto refused", which tells nobody what to do
+	about it."""
+	scope, sim = make(OnStepSimulator(slew_rate_deg_s=2000.0))
+	scope.connected = True
+	try:
+		scope.set_park()
+		scope.park()
+		sim.startup_authority_trusted = False
+		with pytest.raises(errors.InvalidOperationError) as caught:
+			scope.unpark()
+		message = str(caught.value)
+		assert "startup position" in message
+		assert "goto refused" not in message
+	finally:
+		scope.connected = False
+
+
+def test_a_missing_clock_on_unpark_is_not_reported_as_being_parked():
+	""":hR# answers CE_PARKED when the mount has no date and time yet -- the one code whose
+	generic text says the opposite of what it means here, and which would otherwise leave a
+	client stuck handling ParkedError on its way out of a park."""
+	rejected = p.CommandRejected(":hR#", p.CommandError.PARKED)
+	assert isinstance(_rejection_to_ascom(rejected), errors.ParkedError)
+	explained = _rejection_to_ascom(rejected, _UNPARK_REJECTIONS)
+	assert isinstance(explained, errors.InvalidOperationError)
+	assert "date and time" in str(explained)
+
+
+# --------------------------------------------------------------------------------------
+# Reconnecting after a MoveAxis
+
+
+def test_reconnect_still_works_after_a_move_axis():
+	"""Found on the real mount: NINA's manual slew buttons call MoveAxis, :RA#/:RE# set that
+	axis to GR_CUSTOM, and OnStepX then reports rate index 10 as ':' in every :GU#. The
+	driver could not parse its own status and refused to connect until the mount was power
+	cycled, which is a dead session with no obvious cause."""
+	scope, sim = make(OnStepSimulator(slew_rate_deg_s=2000.0))
+	scope.connected = True
+	try:
+		scope.move_axis(Axis.SECONDARY, 0.25)
+		scope.move_axis(Axis.SECONDARY, 0.0)
+		assert sim.guide_rate_index == p.GUIDE_RATE_CUSTOM_INDEX
+		assert ":" in sim.status_string(), "simulator is not reproducing the custom rate"
+	finally:
+		scope.connected = False
+
+	# A second connection, as a restarted driver or a reconnecting client would make.
+	again = Telescope(lambda: MountLink(SimulatedTransport(sim), poll_interval=0.05))
+	again.connected = True
+	try:
+		assert again.connected is True
+		assert again.declination is not None
+		# The guide rate PHD2 reads must still be sane: the pulse rate is a separate field
+		# and the firmware constrains it to 1x or below, so MoveAxis must not disturb it.
+		assert 0 < again.guide_rate_declination <= 2 * SIDEREAL_DEG_PER_SEC
+	finally:
+		again.connected = False

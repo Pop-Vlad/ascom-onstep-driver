@@ -40,8 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
 	                    help="force a serial port, e.g. COM5, skipping detection")
 	parser.add_argument("--baud", type=int, default=None, help="baud rate for --serial-port")
 	parser.add_argument("--host", action="append", default=None, metavar="ADDRESS",
-	                    help="a mount address to try before the firmware default "
-	                         "(repeatable)")
+	                    help="a mount address to try before the firmware default (repeatable)")
 	parser.add_argument("--scan-subnet", action="store_true", default=None,
 	                    help="sweep the local subnet if nothing else answers")
 	parser.add_argument("--no-discovery", action="store_true",

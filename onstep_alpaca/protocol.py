@@ -327,6 +327,24 @@ class Status:
 		return self.park is ParkState.PARKED
 
 
+MAX_GUIDE_RATE_SELECT = 10
+"""``GR_CUSTOM`` (OnStepX ``Guide.h:20``), the largest ``GuideRateSelect``."""
+
+MAX_GENERAL_ERROR = 15
+"""``ERR_NV_INIT`` (``Globals.h:242``, OnStepX ``Limits.cpp:259``)."""
+
+GUIDE_RATE_CUSTOM_INDEX = 10
+"""The index ``:RA#``/``:RE#`` select, so a MoveAxis leaves the axis rate reading as this."""
+
+
+def _decode_offset_field(ch: str, limit: int) -> int:
+	# Decode a '0' + value field, which runs past '9'
+	value = ord(ch) - ord("0")
+	if not 0 <= value <= limit:
+		raise ValueError(f"{ch!r} is not a 0-{limit} field")
+	return value
+
+
 def parse_status(reply: str) -> Status:
 	"""Decode the ``:GU#`` flag string (Command.ino:650)."""
 	text = reply.strip()
@@ -334,11 +352,11 @@ def parse_status(reply: str) -> Status:
 		raise ProtocolError(f"status reply too short: {reply!r}")
 
 	try:
-		general_error = int(text[-1])
-		guide_rate_index = int(text[-2])
-		pulse_guide_rate_index = int(text[-3])
+		general_error = _decode_offset_field(text[-1], MAX_GENERAL_ERROR)
+		guide_rate_index = _decode_offset_field(text[-2], MAX_GUIDE_RATE_SELECT)
+		pulse_guide_rate_index = _decode_offset_field(text[-3], MAX_GUIDE_RATE_SELECT)
 	except ValueError as exc:
-		raise ProtocolError(f"status reply has no numeric tail: {reply!r}") from exc
+		raise ProtocolError(f"status reply has an unreadable tail: {reply!r}") from exc
 
 	pier_side = _PIER_CHARS.get(text[-4])
 	if pier_side is None:
@@ -394,16 +412,24 @@ def parse_status(reply: str) -> Status:
 GENERAL_ERROR_TEXT = {
 	0: "no error",
 	1: "motor or driver fault",
-	2: "both axes should not be in standby",
-	3: "unspecified error",
-	4: "altitude below the minimum limit",
-	5: "altitude above the maximum limit",
-	6: "mount is in standby",
-	7: "mount is parked",
-	8: "goto in progress",
-	9: "outside the mount's limits",
-	10: "hardware fault",
+	2: "altitude below the minimum limit",
+	3: "a limit switch is tripped",
+	4: "outside the declination limits",
+	5: "outside the azimuth limits",
+	6: "past the under-pole limit",
+	7: "past the meridian limit",
+	8: "sync error",
+	9: "park error",
+	10: "goto or sync refused",
+	11: "unspecified error",
+	12: "altitude above the maximum limit",
+	13: "weather sensor did not initialise",
+	14: "site date and time are not set",
+	15: "non-volatile memory error",
 }
+"""``GeneralErrors`` (``Globals.h:242``), identical on both supported firmwares. 8 and 9 are
+marked obsolete in the firmware's own comment. Values above 9 reach the wire as ``':'``
+onwards, which is why the status tail cannot be read as digits."""
 """Decodes the trailing digit of ``:GU#``."""
 
 

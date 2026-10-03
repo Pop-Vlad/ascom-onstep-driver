@@ -24,7 +24,7 @@ import math
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Mapping
 
 from . import errors, protocol
 from .link import LinkError, Motion, MountLink
@@ -129,8 +129,24 @@ _PARK_REJECTIONS = {
 }
 
 
-def _rejection_to_ascom(exc: CommandRejected) -> errors.AscomError:
-	"""Turn the mount's own refusal into the ASCOM exception a client expects."""
+_UNPARK_REJECTIONS = {
+	CommandError.GOTO_ERR_UNSPECIFIED: "the mount does not trust its startup position, so it will "
+	                                   "not unpark; home it (FindHome, or from the hand controller) first",
+	CommandError.PARKED: "the mount has no date and time yet, so it will not unpark",
+	CommandError.NO_PARK_POSITION_SET: "no park position is stored on this mount",
+	CommandError.NOT_PARKED: "this mount unparks only from the park position or from home",
+	CommandError.MOUNT_IN_MOTION: "the mount is still moving",
+}
+
+
+def _rejection_to_ascom(exc: CommandRejected,
+                        explain: Mapping[CommandError, str] | None = None) -> errors.AscomError:
+	"""Turn the mount's own refusal into the ASCOM exception a client expects.
+
+	``explain`` replaces the generic text where one command gives a code its own meaning.
+	"""
+	if explain and exc.error in explain:
+		return errors.InvalidOperationError(f"{exc.command} rejected: {explain[exc.error]}")
 	if exc.error in _PARK_REJECTIONS:
 		return errors.ParkedError(str(exc))
 	if exc.error in (CommandError.PARAM_RANGE, CommandError.PARAM_FORM):
@@ -201,10 +217,25 @@ class Telescope:
 	def _disconnect(self) -> None:
 		link, self._link = self._link, None
 		if link is not None:
+			self._stop_motion_before_close(link)
 			try:
 				link.disconnect()
 			except Exception:  # pragma: no cover - disconnect must not raise
 				log.debug("error during disconnect", exc_info=True)
+
+	def _stop_motion_before_close(self, link: MountLink) -> None:
+		# Never leave the mount moving on a command nobody is left to stop.
+		try:
+			if link.state.status.park is ParkState.PARKING:
+				return
+			if not (self._moving_axes or link.slewing):
+				return
+			log.info("stopping motion before disconnect")
+			link.execute(protocol.ABORT_SLEW, motion=Motion.STOP)
+		except Exception:  # pragma: no cover - disconnect must not raise
+			log.debug("could not stop motion before disconnect", exc_info=True)
+		finally:
+			self._moving_axes.clear()
 
 	def _read_extended_capabilities(self) -> None:
 		"""One-off reads that shape what this driver advertises."""
@@ -280,7 +311,8 @@ class Telescope:
 		except LinkError as exc:
 			raise errors.NotConnectedError(str(exc)) from exc
 
-	def _run(self, *cmds, motion: Motion | None = None, settle: bool = False):
+	def _run(self, *cmds, motion: Motion | None = None, settle: bool = False,
+	         explain: Mapping[CommandError, str] | None = None):
 		"""Send commands, translating the mount's refusals into ASCOM errors."""
 		link = self._require_link()
 		try:
@@ -292,7 +324,7 @@ class Telescope:
 				link.refresh()
 			return result
 		except CommandRejected as exc:
-			raise _rejection_to_ascom(exc) from exc
+			raise _rejection_to_ascom(exc, explain) from exc
 		except LinkError as exc:
 			raise errors.DriverError(str(exc)) from exc
 		except protocol.ProtocolError as exc:
@@ -803,7 +835,7 @@ class Telescope:
 		# A no-op rather than a refusal.
 		if not self.at_park:
 			return
-		self._run(protocol.UNPARK, settle=True)
+		self._run(protocol.UNPARK, settle=True, explain=_UNPARK_REJECTIONS)
 
 	def set_park(self) -> None:
 		self._run(protocol.SET_PARK)

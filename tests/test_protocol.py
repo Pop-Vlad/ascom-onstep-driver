@@ -204,10 +204,12 @@ def test_parse_status_rate_compensation():
 	)
 
 
-def test_parse_status_general_error_is_the_last_digit():
+def test_parse_status_general_error_is_the_last_field():
 	status = p.parse_status("nNp/ET227")
 	assert status.general_error == 7
-	assert p.GENERAL_ERROR_TEXT[7] == "mount is parked"
+	# ERR_MERIDIAN. This assertion used to read "mount is parked", which came from a
+	# mis-transcribed table rather than from Globals.h:242.
+	assert p.GENERAL_ERROR_TEXT[7] == "past the meridian limit"
 
 
 def test_parse_status_unknown_mount_type_degrades_rather_than_raising():
@@ -339,3 +341,53 @@ def test_command_rejected_carries_readable_text():
 	exc = p.CommandRejected(":MS#", p.CommandError.GOTO_ERR_BELOW_HORIZON)
 	assert "below the horizon" in str(exc)
 	assert exc.error is p.CommandError.GOTO_ERR_BELOW_HORIZON
+
+
+# --------------------------------------------------------------------------------------
+# The :GU# tail is not three decimal digits
+
+
+def test_a_custom_axis_rate_arrives_as_a_colon_not_a_digit():
+	"""The exact reply that stopped the driver connecting to the real mount. OnStepX writes
+	the rate fields as '0' + GuideRateSelect, and MoveAxis selects GR_CUSTOM (10), which is
+	':'. Read as a decimal digit it raised ProtocolError and the connect never completed."""
+	status = p.parse_status("nNPHaEo1:0")
+	assert status.guide_rate_index == p.GUIDE_RATE_CUSTOM_INDEX == 10
+	assert status.pulse_guide_rate_index == 1
+	assert status.general_error == 0
+	assert status.park is p.ParkState.PARKED
+	assert status.mount_type is p.MountType.GEM
+	assert status.pier_side is p.PierSide.NONE
+
+
+def test_a_general_error_above_nine_is_decoded_too():
+	"""ERR_SITE_INIT is 14, so it reaches the wire as '>'. A mount whose clock was never set
+	would otherwise have been unparseable - and that is a first-boot state, not a rare one."""
+	status = p.parse_status("nNPHaEo11>")
+	assert status.general_error == 14
+	assert "date and time" in p.GENERAL_ERROR_TEXT[14]
+
+
+def test_the_highest_defined_fields_still_decode():
+	status = p.parse_status("nNPHaEo::?")
+	assert status.pulse_guide_rate_index == 10
+	assert status.guide_rate_index == 10
+	assert status.general_error == 15      # ERR_NV_INIT
+
+
+def test_a_genuinely_unreadable_tail_is_still_rejected():
+	"""Permissiveness has to stop somewhere: a letter in the error position is garbage, not
+	an offset field, and must not decode to some large number."""
+	for bad in ("nNPHaEo1:X", "nNPHaEo1:/", "nNPHaEoAB0"):
+		with pytest.raises(p.ProtocolError):
+			p.parse_status(bad)
+
+
+def test_the_general_error_table_matches_the_firmware_enum():
+	"""GeneralErrors in Globals.h:242, shared by 4.24 and OnStepX. The table used to be
+	wrong from index 2 on, so a tripped limit switch reported "unspecified error"."""
+	assert len(p.GENERAL_ERROR_TEXT) == p.MAX_GENERAL_ERROR + 1
+	assert p.GENERAL_ERROR_TEXT[2] == "altitude below the minimum limit"
+	assert "limit switch" in p.GENERAL_ERROR_TEXT[3]
+	assert "declination" in p.GENERAL_ERROR_TEXT[4]
+	assert "maximum" in p.GENERAL_ERROR_TEXT[12]
