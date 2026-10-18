@@ -23,9 +23,8 @@ from .transport import Transport, TransportError
 
 log = logging.getLogger(__name__)
 
-DEFAULT_POLL_INTERVAL = 0.25
-"""Seconds between status refreshes. OnStep caches its own coordinates for 50 ms (500 ms on
-an AVR), so polling faster only steals link time from real commands."""
+DEFAULT_POLL_INTERVAL = 0.5
+"""Seconds between status refreshes."""
 
 RECONNECT_BACKOFF = 2.0
 """Seconds to wait before retrying a link that failed."""
@@ -38,6 +37,9 @@ _SHUTDOWN = object()
 """Sentinel queued by :meth:`MountLink.disconnect` to wake the thread immediately."""
 
 SLOW_GROUP = (protocol.GET_ALTITUDE, protocol.GET_AZIMUTH, protocol.GET_SIDEREAL_TIME)
+
+SIDEREAL_HOURS_PER_HOUR = protocol.SIDEREAL_ARCSEC_PER_SEC / 15.0
+"""Sidereal hours per solar hour: how fast ``:GS#`` runs against the wall clock."""
 """One of these per cycle, round-robin. Nothing polls them hard, and alt/az is derivable from
 the equatorial position anyway, so a refresh every few cycles is ample."""
 
@@ -100,6 +102,18 @@ class MountState:
 	azimuth: float
 	sidereal_time: float
 	sampled_at: float
+	sidereal_time_at: float = 0.0
+	"""When ``sidereal_time`` was actually read, which is not ``sampled_at``: the slow
+	fields are read one per cycle, so this value is usually carried over from an earlier
+	one."""
+
+	@property
+	def sidereal_time_now(self) -> float:
+		"""``sidereal_time`` advanced to this moment."""
+		if not self.sidereal_time_at:
+			return self.sidereal_time
+		elapsed = time.monotonic() - self.sidereal_time_at
+		return (self.sidereal_time + elapsed * SIDEREAL_HOURS_PER_HOUR / 3600.0) % 24.0
 	"""``time.monotonic()`` when the fast group finished. The motion latch compares against
 	this, so it must mean "status is at least this fresh"."""
 
@@ -367,21 +381,47 @@ class MountLink:
 		self.commands_sent += 1
 		return self._transport.exchange(cmd)
 
+	def _serve_pending(self, deferred: list["_Request"]) -> None:
+		"""Serve queued commands without waiting for the poll cycle to finish.
+		A guide pulse arriving mid-cycle would otherwise wait for the whole cycle
+		"""
+		while not self._stop.is_set():
+			try:
+				request = self._queue.get_nowait()
+			except queue.Empty:
+				return
+			if request is _SHUTDOWN:
+				self._queue.put(_SHUTDOWN)  # the main loop is the one that acts on it
+				return
+			if request.cmd is None:
+				deferred.append(request)
+				continue
+			try:
+				self._serve(request)
+			finally:
+				request.done.set()
+
 	def _poll_cycle(self, read_all_slow: bool = False) -> None:
 		"""Refresh the cache: status, RA and Dec every time, plus one slow field."""
 		self._next_poll = time.monotonic() + self.poll_interval
+		deferred: list[_Request] = []
 		try:
 			self._ensure_link()
 			status = protocol.parse_status(self._raw_exchange(protocol.GET_STATUS))
-			ra = protocol.parse_hms(self._raw_exchange(protocol.GET_RA))
-			dec = protocol.parse_dms(self._raw_exchange(protocol.GET_DEC))
 			sampled_at = time.monotonic()
+			self._serve_pending(deferred)
+			ra = protocol.parse_hms(self._raw_exchange(protocol.GET_RA))
+			self._serve_pending(deferred)
+			dec = protocol.parse_dms(self._raw_exchange(protocol.GET_DEC))
+			self._serve_pending(deferred)
 
 			previous = self._state
 			state = MountState(status=status, ra_hours=ra, dec_degrees=dec,
 			                   altitude=previous.altitude if previous else 0.0,
 			                   azimuth=previous.azimuth if previous else 0.0,
-			                   sidereal_time=previous.sidereal_time if previous else 0.0, sampled_at=sampled_at)
+			                   sidereal_time=previous.sidereal_time if previous else 0.0,
+			                   sidereal_time_at=previous.sidereal_time_at if previous else 0.0,
+			                   sampled_at=sampled_at)
 			self._state = state
 			self._state = self._poll_slow(state, read_all_slow)
 			self._clear_fault()
@@ -391,6 +431,11 @@ class MountLink:
 			# Down and still inside its backoff; _ensure_link already recorded the fault.
 			# Must not escape, or one dropout would kill the owner thread for good.
 			log.debug("poll skipped: %s", exc)
+		finally:
+			# Deferred refreshes asked for a sample and this cycle is it, faulted or not --
+			# matching what serving them directly would have done.
+			for request in deferred:
+				request.done.set()
 
 	def _poll_slow(self, state: MountState, read_all: bool) -> MountState:
 		"""Read one slow field (or all of them, at connect)."""
@@ -412,6 +457,7 @@ class MountLink:
 				updates["azimuth"] = protocol.parse_dms(reply) % 360.0
 			elif cmd is protocol.GET_SIDEREAL_TIME:
 				updates["sidereal_time"] = protocol.parse_hms(reply)
+				updates["sidereal_time_at"] = time.monotonic()
 		return replace(state, **updates) if updates else state
 
 	# -- capabilities ------------------------------------------------------------

@@ -61,7 +61,9 @@ class Config:
 	intrusive thing the driver can do to a network."""
 
 	prefer_usb: bool = True
-	poll_interval: float = 0.25
+	poll_interval: float = 0.5
+	"""Seconds between status refreshes; see ``link.DEFAULT_POLL_INTERVAL``. Lower it for a
+	snappier position display, at the cost of guide-pulse latency."""
 	site_elevation: float = 0.0
 	"""ASCOM wants an elevation; OnStep has nowhere to store one."""
 

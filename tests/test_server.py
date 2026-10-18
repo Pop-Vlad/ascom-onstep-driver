@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import builtins
 import json
 import socket
+import sys
+import types
+from unittest import mock
 
 import pytest
 
-from onstep_alpaca import discovery
+from onstep_alpaca import __main__, discovery
 from onstep_alpaca.config import Config, default_config_path
 from onstep_alpaca.discovery_server import (
 	DISCOVERY_REQUEST,
@@ -246,3 +250,53 @@ def test_a_discovered_mount_is_remembered_because_the_driver_learned_it(tmp_path
 	assert discovery.target_from_dict(reloaded.remembered_target) == discovery.SerialTarget(
 		"COM9", 19200
 	)
+
+
+# --------------------------------------------------------------------------------------
+# Choosing a WSGI server
+
+
+def test_waitress_is_used_to_serve():
+	"""Werkzeug's development server has no keep-alive -- it sends Connection: close on
+	every response by design -- which cost a TCP handshake per Alpaca call, about 15 ms
+	against 0.06 ms for a loopback round trip, and PHD2 makes several calls per guide
+	correction."""
+	served = {}
+	fake = types.ModuleType("waitress")
+	fake.serve = lambda app, **kwargs: served.update(app=app, **kwargs)
+	with mock.patch.dict(sys.modules, {"waitress": fake}):
+		app = object()
+		__main__._serve(app, "127.0.0.1", 11111)
+	assert served["app"] is app
+	assert served["host"] == "127.0.0.1" and served["port"] == 11111
+	# A synchronous slew holds its request open for minutes while the client keeps polling
+	# Slewing, so a single-threaded server would stop answering for all of it.
+	assert served["threads"] > 1
+
+
+def test_serving_falls_back_when_waitress_is_missing():
+	"""The fallback only runs on a machine without waitress, which is exactly where a
+	mistake in it would go unnoticed until the driver refused to start."""
+	class _App:
+		def __init__(self):
+			self.kwargs = None
+
+		def run(self, **kwargs):
+			self.kwargs = kwargs
+
+	app = _App()
+	real_import = builtins.__import__
+
+	def no_waitress(name, *args, **kwargs):
+		if name == "waitress":
+			raise ImportError("no waitress here")
+		return real_import(name, *args, **kwargs)
+
+	with mock.patch.dict(sys.modules, {}, clear=False):
+		sys.modules.pop("waitress", None)
+		with mock.patch.object(builtins, "__import__", no_waitress):
+			__main__._serve(app, "0.0.0.0", 11111)
+
+	assert app.kwargs is not None, "the development server was never started"
+	assert app.kwargs["threaded"] is True
+	assert app.kwargs["port"] == 11111

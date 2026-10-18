@@ -8,6 +8,7 @@ command, which is what the sample-time latch is for.
 
 from __future__ import annotations
 
+import dataclasses
 import threading
 import time
 
@@ -446,3 +447,107 @@ def test_state_stays_readable_while_the_link_is_down():
 	finally:
 		link.disconnect()
 		server.stop()
+
+
+# --------------------------------------------------------------------------------------
+# A poll cycle must not block a guide pulse
+
+
+def test_a_command_interrupts_the_poll_cycle():
+	"""A pulse arriving mid-cycle used to wait for all four of the cycle's round trips --
+	about 67 ms at 9600 baud, and the whole of the PulseGuide tail. It must now be served
+	between commands, so it lands *inside* the cycle's own sequence rather than after it."""
+	sim = OnStepSimulator()
+	# Slow enough that the pulse reliably arrives while the cycle is still running.
+	link = MountLink(SimulatedTransport(sim, byte_delay=0.002), poll_interval=10.0)
+	link.connect()
+	try:
+		wait_until(lambda: link.state is not None)
+		sim.log.clear()
+		done = threading.Event()
+
+		def refresh():
+			link.refresh(timeout=10)
+			done.set()
+
+		threading.Thread(target=refresh, daemon=True).start()
+		wait_until(lambda: any(c == ":GU#" for c in sim.log))   # the cycle has started
+		link.execute(p.pulse_guide(0, 200))
+		assert done.wait(10), "the refresh never completed"
+
+		log = list(sim.log)
+		pulse = next(i for i, c in enumerate(log) if c.startswith(":MG"))
+		after = [c for c in log[pulse + 1:]]
+		assert after, "the pulse was served after the whole cycle, not inside it"
+		assert any(c in (":GRa#", ":GDe#", ":GA#", ":GZ#", ":GS#") for c in after), (
+			"expected cycle reads after the pulse, got %r" % (after,))
+	finally:
+		link.disconnect()
+
+
+def test_an_interrupting_command_does_not_make_the_sample_lie_about_motion():
+	"""The cycle stamps its sample when the status is read. If it stamped later, a goto
+	served mid-cycle would set the motion latch *before* the stamp, and Slewing would read
+	False for a mount that had just been told to move."""
+	sim = OnStepSimulator(slew_rate_deg_s=0.5)
+	link = MountLink(SimulatedTransport(sim, byte_delay=0.002), poll_interval=10.0)
+	link.connect()
+	try:
+		wait_until(lambda: link.state is not None)
+		sim.log.clear()
+		sampled = {}
+		done = threading.Event()
+
+		def refresh():
+			sampled["state"] = link.refresh(timeout=10)
+			done.set()
+
+		threading.Thread(target=refresh, daemon=True).start()
+		wait_until(lambda: any(c == ":GU#" for c in sim.log))
+		link.execute(p.set_target_dec(10.0))
+		link.execute(p.GOTO_TARGET, motion=Motion.START)
+		assert done.wait(10), "the refresh never completed"
+
+		# That cycle read the status before the goto was sent, so the sample it published
+		# describes a mount that was not yet moving. Stamping it after the interruption
+		# would put it past the latch, and `slewing` would answer False.
+		state = sampled["state"]
+		assert state.sampled_at < link._motion_started_at, (
+			"the sample is stamped after the goto it predates, so the motion latch cannot fire")
+	finally:
+		link.disconnect()
+
+
+def test_sidereal_time_is_carried_forward_between_reads():
+	""":GS# is read one cycle in three, so served as stored it was up to three intervals
+	stale -- measured at 49% of samples beyond ConformU's 1 second tolerance at a 0.5 s
+	poll. It is a clock, so it can be advanced exactly instead of re-read."""
+	sim = OnStepSimulator()
+	link = MountLink(SimulatedTransport(sim), poll_interval=10.0)
+	link.connect()
+	try:
+		wait_until(lambda: link.state.sidereal_time > 0.0)
+		state = link.state
+		stored = state.sidereal_time
+		assert state.sidereal_time_at > 0.0, "the read was never timestamped"
+		time.sleep(0.5)
+		advanced = state.sidereal_time_now
+		# Half a second of wall clock is a touch more in sidereal seconds.
+		moved = (advanced - stored) * 3600.0
+		assert 0.4 < moved < 0.7, "expected ~0.5 sidereal seconds, got %.3f" % moved
+		assert link.state.sidereal_time == stored, "the stored sample must not be mutated"
+	finally:
+		link.disconnect()
+
+
+def test_sidereal_time_wraps_at_24_hours():
+	sim = OnStepSimulator()
+	link = MountLink(SimulatedTransport(sim), poll_interval=10.0)
+	link.connect()
+	try:
+		wait_until(lambda: link.state.sidereal_time > 0.0)
+		near_midnight = dataclasses.replace(
+			link.state, sidereal_time=23.9999, sidereal_time_at=time.monotonic() - 2.0)
+		assert 0.0 <= near_midnight.sidereal_time_now < 24.0
+	finally:
+		link.disconnect()

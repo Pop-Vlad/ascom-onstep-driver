@@ -459,7 +459,8 @@ class Telescope:
 
 	@property
 	def sidereal_time(self) -> float:
-		return self._state().sidereal_time
+		# Advanced to now rather than served as read: see MountState.sidereal_time_now.
+		return self._state().sidereal_time_now
 
 	@property
 	def at_home(self) -> bool:
@@ -497,7 +498,7 @@ class Telescope:
 		self._validate_dec(dec_degrees)
 		if self._never_flips:
 			return _PIER_SIDES.get(link.state.status.pier_side, AscomPierSide.UNKNOWN)
-		hour_angle = _wrap_hours(link.state.sidereal_time - ra_hours)
+		hour_angle = _wrap_hours(link.state.sidereal_time_now - ra_hours)
 		return AscomPierSide.WEST if hour_angle < 0 else AscomPierSide.EAST
 
 	@property
@@ -869,8 +870,20 @@ class Telescope:
 			time.sleep(self._slew_settle_time)
 
 	def _wait_for(self, done: Callable[[], bool]) -> None:
+		"""Block until the mount is done.
+		Polling the cache here would tie slew completion to the poll interval and add up to
+		one whole interval to every synchronous goto, park and home. Nothing else needs the
+		link while a slew is running, so forcing a sample costs nothing that matters.
+		"""
 		deadline = time.monotonic() + self._slew_timeout
-		while not done():
+		link = self._require_link()
+		while True:
+			try:
+				link.refresh()
+			except LinkError as exc:
+				raise errors.DriverError(f"lost the mount while waiting for it: {exc}") from exc
+			if done():
+				return
 			if time.monotonic() > deadline:
 				raise errors.DriverError(
 					f"the mount was still moving after {self._slew_timeout:.0f}s; ""treating that as a fault rather than reporting success")

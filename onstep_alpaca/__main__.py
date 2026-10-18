@@ -192,9 +192,7 @@ def main(argv: list[str] | None = None) -> int:
 		log.warning("serving a SIMULATED mount; no hardware is being controlled")
 
 	try:
-		# threaded=True matters: a synchronous slew holds its request open for minutes, and
-		# a single-threaded server would stop answering Slewing polls for all of it.
-		app.run(host=config.bind_address, port=config.alpaca_port, threaded=True, use_reloader=False, )
+		_serve(app, config.bind_address, config.alpaca_port)
 	except KeyboardInterrupt:  # pragma: no cover - interactive
 		log.info("stopping")
 	finally:
@@ -205,6 +203,24 @@ def main(argv: list[str] | None = None) -> int:
 		except Exception:  # pragma: no cover - shutdown must not raise
 			pass
 	return 0
+
+
+def _serve(app, host: str, port: int) -> None:
+	"""Serve the Alpaca app on waitress, falling back to Flask's development server.
+
+	Werkzeug's server has no keep-alive at all -- it sends ``Connection: close`` on every
+	response by design -- so each Alpaca call costs a fresh TCP connection: about 15 ms here
+	against 0.06 ms for a loopback round trip. PHD2 makes several calls per guide correction,
+	which made that the driver's largest single source of latency.
+	"""
+	try:
+		from waitress import serve
+	except ImportError:  # pragma: no cover - depends on the environment
+		log.warning("waitress is not installed, falling back to the development server; "
+		            "it closes the connection after every request, which costs about 15 ms a call")
+		app.run(host=host, port=port, threaded=True, use_reloader=False)
+		return
+	serve(app, host=host, port=port, threads=8, ident="OnStep Alpaca")
 
 
 if __name__ == "__main__":
