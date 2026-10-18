@@ -62,6 +62,11 @@ def test_a_missing_config_file_gives_defaults(tmp_path):
 	assert config.unique_id
 
 
+def test_the_api_is_local_only_by_default():
+	"""It is unauthenticated and can drive the mount, so the network has to be opted into."""
+	assert Config().bind_address == "127.0.0.1"
+
+
 def test_a_corrupt_config_file_is_survivable(tmp_path):
 	"""Refusing to start because a settings file got truncated would be the less useful
 	behaviour: the driver can always run on defaults."""

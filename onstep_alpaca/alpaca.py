@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import datetime as dt
+import ipaddress
 import itertools
 import logging
+import socket
 import threading
+from typing import Iterable
 
 from flask import Flask, Response, jsonify, request
 
@@ -312,6 +315,41 @@ GET_METHODS: dict[str, callable] = {
 
 
 # --------------------------------------------------------------------------------------
+# Host check
+
+
+def _own_names() -> set[str]:
+	"""Names this machine answers to. An attacker's domain cannot be one of them."""
+	names = {"localhost"}
+	for name in (socket.gethostname(), socket.getfqdn()):
+		if name:
+			names.add(name.lower())
+			names.add(f"{name.split('.')[0].lower()}.local")
+	return names
+
+
+def _host_name(header: str) -> str:
+	"""The Host header without its port, and IPv6 brackets."""
+	header = header.strip().lower()
+	if header.startswith("["):
+		return header[1:header.find("]")] if "]" in header else header[1:]
+	return header.rpartition(":")[0] if header.count(":") == 1 else header
+
+
+def host_is_allowed(header: str | None, allowed: set[str]) -> bool:
+	"""Defeat DNS rebinding: a browser tricked into reaching us still sends the attacker's
+	domain as Host. IP literals cannot be rebound, so they always pass."""
+	if not header:
+		return True  # no browser omits it; only bare HTTP/1.0 clients do
+	name = _host_name(header).rstrip(".")
+	try:
+		ipaddress.ip_address(name)
+		return True
+	except ValueError:
+		return name in allowed
+
+
+# --------------------------------------------------------------------------------------
 # The app
 
 
@@ -321,10 +359,21 @@ def create_app(
 		device_name: str = "OnStep",
 		location: str = "",
 		setup_page: callable | None = None,
+		allowed_hosts: Iterable[str] = (),
 ) -> Flask:
 	"""Build the Flask app serving one telescope."""
 	app = Flask(__name__)
 	transactions = _Transactions()
+	permitted = _own_names() | {host.strip().lower().rstrip(".") for host in allowed_hosts if host.strip()}
+
+	@app.before_request
+	def _check_host():
+		header = request.headers.get("Host")
+		if not host_is_allowed(header, permitted):
+			log.warning("refused a request for host %r from %s (DNS rebinding?); add it to "
+			            "allowed_hosts if it is yours", header, request.remote_addr)
+			return Response(f"host {header!r} is not allowed", status=403, mimetype="text/plain")
+		return None
 
 	def envelope(value=None, error: AscomError | None = None) -> Response:
 		params = _params()

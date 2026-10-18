@@ -34,8 +34,8 @@ def build_parser() -> argparse.ArgumentParser:
 	                    help=f"config file (default: {default_config_path()})")
 	parser.add_argument("--port", type=int, default=None, help="Alpaca API port")
 	parser.add_argument("--bind", default=None,
-	                    help="address to bind (default 0.0.0.0; use 127.0.0.1 to keep "
-	                         "the driver on this machine only)")
+	                    help="address to bind (default 127.0.0.1; use 0.0.0.0 to let "
+	                         "clients on other machines reach it)")
 	parser.add_argument("--serial-port", default=None,
 	                    help="force a serial port, e.g. COM5, skipping detection")
 	parser.add_argument("--baud", type=int, default=None, help="baud rate for --serial-port")
@@ -179,7 +179,8 @@ def main(argv: list[str] | None = None) -> int:
 	                  site_elevation=config.site_elevation, )
 
 	app = create_app(scope, device_number=config.device_number, device_name=config.device_name,
-	                 location=config.location, setup_page=lambda: render(scope, config, config.alpaca_port), )
+	                 location=config.location, setup_page=lambda: render(scope, config, config.alpaca_port),
+	                 allowed_hosts=config.allowed_hosts, )
 
 	responder = None
 	if config.discovery_enabled:

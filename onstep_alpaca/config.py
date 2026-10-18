@@ -34,9 +34,13 @@ def default_config_path() -> Path:
 class Config:
 	# -- server
 	alpaca_port: int = DEFAULT_ALPACA_PORT
-	bind_address: str = "0.0.0.0"
-	"""Default is every interface, so NINA or PHD2 on another machine can reach it. Set to
-	127.0.0.1 to keep the driver local to this PC."""
+	bind_address: str = "127.0.0.1"
+	"""Default is this PC only: the API has no authentication and can drive the mount, so
+	exposing it is opt-in. Set to 0.0.0.0 for NINA or PHD2 on another machine."""
+
+	allowed_hosts: list[str] = field(default_factory=list)
+	"""Extra hostnames clients may use to reach the API. IP addresses, localhost and this
+	machine's own name always work; anything else is refused, to stop DNS rebinding."""
 
 	discovery_enabled: bool = True
 	device_number: int = 0

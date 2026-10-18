@@ -434,3 +434,39 @@ def test_disconnecting_over_http(connected):
 	assert connected.put(f"{BASE}/connected", data={"Connected": "False"}).status_code == 200
 	assert value(connected.get(f"{BASE}/connected")) is False
 	assert body(connected.get(f"{BASE}/declination"))["ErrorNumber"] == 0x407
+
+
+# -- Host check (DNS rebinding) --------------------------------------------------------
+
+
+@pytest.mark.parametrize("host", ["localhost", "localhost:11111", "127.0.0.1:11111", "192.168.1.20:11111",
+                                  "[::1]:11111", "::1"])
+def test_ip_addresses_and_localhost_are_always_served(client, host):
+	assert client.get("/management/apiversions", headers={"Host": host}).status_code == 200
+
+
+@pytest.mark.parametrize("path", ["/management/apiversions", "/setup", f"{BASE}/connected"])
+def test_a_rebound_domain_is_refused_everywhere(client, path):
+	"""The attack: evil.example resolves to 127.0.0.1, so the browser sends its own name."""
+	assert client.get(path, headers={"Host": "evil.example:11111"}).status_code == 403
+
+
+def test_a_rebound_domain_cannot_drive_the_mount(client, scope):
+	response = client.put(f"{BASE}/connected", data={"Connected": "True"}, headers={"Host": "evil.example"})
+	assert response.status_code == 403
+	assert not scope.connected
+
+
+def test_this_machines_own_name_is_served(client):
+	import socket
+
+	name = socket.gethostname()
+	assert client.get("/management/apiversions", headers={"Host": f"{name}:11111"}).status_code == 200
+	assert client.get("/management/apiversions", headers={"Host": f"{name.upper()}.local"}).status_code == 200
+
+
+def test_configured_hosts_are_served(scope):
+	app = create_app(scope, allowed_hosts=["Observatory.lan", " "])
+	with app.test_client() as client:
+		assert client.get("/management/apiversions", headers={"Host": "observatory.lan."}).status_code == 200
+		assert client.get("/management/apiversions", headers={"Host": "other.lan"}).status_code == 403
