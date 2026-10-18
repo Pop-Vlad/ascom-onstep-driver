@@ -128,7 +128,6 @@ _PARK_REJECTIONS = {
 	CommandError.SLEW_ERR_IN_PARK,
 }
 
-
 _UNPARK_REJECTIONS = {
 	CommandError.GOTO_ERR_UNSPECIFIED: "the mount does not trust its startup position, so it will "
 	                                   "not unpark; home it (FindHome, or from the hand controller) first",

@@ -1,3 +1,6 @@
+# `pip install -r requirements.txt`.
+# Prefer `pip install -e .`, which also builds the onstep-alpaca and onstep-alpaca-tray launchers.
+
 # Alpaca REST server and its /setup page.
 flask>=3.0
 
@@ -9,6 +12,9 @@ waitress>=3.0
 # Imported lazily by transport.py and discovery.py so the package, its tests and the
 # simulator all work on a machine without it.
 pyserial>=3.5
+
+pystray>=0.19
+pillow>=10
 
 # Tests only:
 #   pytest

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import builtins
 import json
+import logging
 import socket
 import sys
 import types
@@ -11,7 +12,7 @@ from unittest import mock
 
 import pytest
 
-from onstep_alpaca import __main__, discovery
+from onstep_alpaca import __main__, autostart, discovery
 from onstep_alpaca.config import Config, default_config_path
 from onstep_alpaca.discovery_server import (
 	DISCOVERY_REQUEST,
@@ -277,6 +278,7 @@ def test_waitress_is_used_to_serve():
 def test_serving_falls_back_when_waitress_is_missing():
 	"""The fallback only runs on a machine without waitress, which is exactly where a
 	mistake in it would go unnoticed until the driver refused to start."""
+
 	class _App:
 		def __init__(self):
 			self.kwargs = None
@@ -300,3 +302,128 @@ def test_serving_falls_back_when_waitress_is_missing():
 	assert app.kwargs is not None, "the development server was never started"
 	assert app.kwargs["threaded"] is True
 	assert app.kwargs["port"] == 11111
+
+
+# --------------------------------------------------------------------------------------
+# Running unattended: logging, one instance, start at login
+
+
+class FakeRunKey:
+	"""Stands in for the HKCU Run key, so the tests never touch the real registry."""
+
+	def __init__(self):
+		self.value = None
+
+	def read(self):
+		return self.value
+
+	def write(self, value):
+		self.value = value
+
+	def remove(self):
+		self.value = None
+
+
+def test_autostart_toggles_and_reports():
+	store = FakeRunKey()
+	assert autostart.is_enabled(store) is False
+	assert autostart.enable(store) is True
+	assert autostart.is_enabled(store) is True
+	assert store.value and "onstep" in store.value.lower()
+	assert autostart.disable(store) is False
+	assert autostart.is_enabled(store) is False
+	autostart.disable(store)  # removing it twice must not raise
+
+
+def test_autostart_registers_a_windowless_launcher():
+	"""A console window appearing at every login would be worse than no autostart, so the
+	command has to be the gui-script wrapper or pythonw -- never plain python.exe."""
+	command = autostart.launch_command()
+	assert command.startswith('"')
+	head = command.split('"')[1].lower()
+	assert head.endswith("onstep-alpaca-tray.exe") or head.endswith("pythonw.exe"), command
+
+
+def test_autostart_never_registers_the_console_build(tmp_path, monkeypatch):
+	"""``onstep-alpaca --autostart on`` is the documented way to switch this on, and that is
+	the console build -- so the running executable is precisely the wrong thing to register.
+	An installed build must always reach sideways for the windowless launcher instead."""
+	console = tmp_path / "onstep-alpaca.exe"
+	tray = tmp_path / autostart.LAUNCHER
+	console.write_bytes(b"")
+	tray.write_bytes(b"")
+	monkeypatch.setattr(sys, "frozen", True, raising=False)
+	monkeypatch.setattr(sys, "executable", str(console))
+	monkeypatch.setattr(sys, "argv", [str(console), "--autostart", "on"])
+
+	assert autostart.launch_command() == f'"{tray}"'
+
+	# With no launcher beside it there is no interpreter to fall back on either, so the
+	# only honest answer left is the running build.
+	tray.unlink()
+	assert autostart.launch_command() == f'"{console}"'
+
+
+def test_a_failing_registry_is_reported_rather_than_raised():
+	class Broken(FakeRunKey):
+		def write(self, value):
+			raise OSError("denied")
+
+	assert autostart.enable(Broken()) is False
+
+
+def test_already_serving_sees_a_listening_port():
+	"""Autostart makes a second launch ordinary, and under pythonw the bind error would go
+	to a console that does not exist."""
+	with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+		server.bind(("127.0.0.1", 0))
+		server.listen(8)  # each probe leaves a connection queued, unaccepted
+		port = server.getsockname()[1]
+		assert __main__.already_serving("127.0.0.1", port) is True
+		# 0.0.0.0 has to be probed as loopback: binding it would succeed even though
+		# another process holds the same port on 127.0.0.1.
+		assert __main__.already_serving("0.0.0.0", port) is True
+	assert __main__.already_serving("127.0.0.1", port) is False
+
+
+def test_logging_survives_having_no_console(tmp_path, monkeypatch):
+	"""pythonw leaves sys.stderr as None, and that is exactly the launch the tray uses --
+	a StreamHandler would fail on its first record, losing the log when it matters most."""
+	log_file = tmp_path / "driver.log"
+	config = Config(log_level="INFO", log_file=str(log_file))
+	monkeypatch.setattr(sys, "stderr", None)
+	try:
+		__main__.configure_logging(config)
+		logging.getLogger("onstep_alpaca").info("hello from a windowless process")
+		for handler in logging.getLogger().handlers:
+			handler.flush()
+	finally:
+		logging.getLogger().handlers.clear()
+	assert "hello from a windowless process" in log_file.read_text(encoding="utf-8")
+
+
+def test_the_tray_serves_normally_when_pystray_is_missing(monkeypatch):
+	"""The driver has to keep running headless -- on a Pi at the mount there is no tray."""
+	from onstep_alpaca import tray
+
+	served = []
+
+	class FakeService:
+		def run(self):
+			served.append(True)
+			return 0
+
+	monkeypatch.setattr(tray, "build_service", lambda args: FakeService())
+	monkeypatch.setattr(tray, "configure_logging", lambda config: None)
+	real_import = builtins.__import__
+
+	def no_pystray(name, *args, **kwargs):
+		if name == "pystray":
+			raise ImportError("no pystray here")
+		return real_import(name, *args, **kwargs)
+
+	with mock.patch.dict(sys.modules, {}, clear=False):
+		sys.modules.pop("pystray", None)
+		with mock.patch.object(builtins, "__import__", no_pystray):
+			assert tray.main(["--simulate", "--no-discovery"]) == 0
+	assert served == [True], "the tray did not fall back to serving"

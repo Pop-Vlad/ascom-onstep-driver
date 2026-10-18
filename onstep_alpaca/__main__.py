@@ -13,7 +13,9 @@ from __future__ import annotations
 import argparse
 import copy
 import logging
+import socket
 import sys
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from . import discovery
@@ -49,6 +51,11 @@ def build_parser() -> argparse.ArgumentParser:
 	                    help="seconds between mount status refreshes")
 	parser.add_argument("--log-level", default=None,
 	                    choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+	parser.add_argument("--log-file", default=None, metavar="PATH",
+	                    help=f"also write the log here (default: console only; "
+	                         f"the tray icon uses {default_log_path()})")
+	parser.add_argument("--autostart", choices=["on", "off", "status"], default=None,
+	                    help="start the tray app when you log in, then exit")
 	parser.add_argument("--scan", action="store_true",
 	                    help="list the mounts that can be found, then exit")
 	parser.add_argument("--simulate-slew-rate", type=float, default=6.0,
@@ -77,7 +84,56 @@ def apply_overrides(config: Config, args: argparse.Namespace) -> Config:
 		config.poll_interval = args.poll_interval
 	if args.log_level is not None:
 		config.log_level = args.log_level
+	if args.log_file is not None:
+		config.log_file = args.log_file
 	return config
+
+
+def default_log_path() -> Path:
+	"""Beside the config file, which is already a per-user directory we know is writable."""
+	return default_config_path().with_name("onstep-alpaca.log")
+
+
+def configure_logging(config: Config) -> None:
+	"""Console when there is one, plus a rotating file when asked.
+
+	``pythonw`` gives a process no console at all and leaves ``sys.stderr`` as None, so a
+	StreamHandler would blow up on its first record. That is the launch the tray icon uses,
+	which is exactly when the log matters most.
+	"""
+	handlers: list[logging.Handler] = []
+	if sys.stderr is not None:
+		handlers.append(logging.StreamHandler())
+
+	failure = None
+	if config.log_file:
+		try:
+			path = Path(config.log_file).expanduser()
+			path.parent.mkdir(parents=True, exist_ok=True)
+			handlers.append(RotatingFileHandler(path, maxBytes=1_000_000, backupCount=3,
+			                                    encoding="utf-8"))
+		except OSError as exc:
+			failure = exc
+
+	logging.basicConfig(level=getattr(logging, config.log_level, logging.INFO),
+	                    format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+	                    datefmt="%H:%M:%S", handlers=handlers, force=True)
+	if failure is not None:
+		log.warning("could not open the log file %s: %s", config.log_file, failure)
+
+
+def already_serving(host: str, port: int) -> bool:
+	"""Is an instance already listening?
+
+	Autostart makes this ordinary rather than exotic: launch the tray by hand when login
+	already started one and the bind error would otherwise go to a console that does not
+	exist. Asked by connecting rather than binding, because binding 0.0.0.0 succeeds even
+	when another process holds 127.0.0.1 on the same port.
+	"""
+	probe = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
+	with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+		sock.settimeout(0.5)
+		return sock.connect_ex((probe, port)) == 0
 
 
 def make_link_factory(config: Config, args: argparse.Namespace, remember: "callable[[dict], None]"):
@@ -142,8 +198,51 @@ def run_scan() -> int:
 	return 0
 
 
-def main(argv: list[str] | None = None) -> int:
-	args = build_parser().parse_args(argv)
+class Service:
+	"""A driver wired up but not yet serving, so the tray app can share the wiring."""
+
+	def __init__(self, config: Config, scope: Telescope, app, responder, simulated: bool):
+		self.config = config
+		self.scope = scope
+		self.app = app
+		self.responder = responder
+		self.simulated = simulated
+
+	@property
+	def url(self) -> str:
+		return f"http://{self.config.bind_address}:{self.config.alpaca_port}/"
+
+	def announce(self) -> None:
+		log.info("serving Alpaca on %s  (setup page at /setup)", self.url)
+		if self.simulated:
+			log.warning("serving a SIMULATED mount; no hardware is being controlled")
+
+	def serve(self) -> None:
+		"""Block, serving requests. The tray runs this on a worker thread."""
+		_serve(self.app, self.config.bind_address, self.config.alpaca_port)
+
+	def run(self) -> int:
+		self.announce()
+		try:
+			self.serve()
+		except KeyboardInterrupt:  # pragma: no cover - interactive
+			log.info("stopping")
+		finally:
+			self.shutdown()
+		return 0
+
+	def shutdown(self) -> None:
+		if self.responder is not None:
+			self.responder.stop()
+			self.responder = None
+		try:
+			self.scope.connected = False
+		except Exception:  # pragma: no cover - shutdown must not raise
+			pass
+
+
+def build_service(args: argparse.Namespace) -> "Service | None":
+	"""Everything from the config file to a ready app. None if one is already running."""
 	config_path = args.config or default_config_path()
 
 	# Two configs: `persisted` is the file, `config` is that plus this run's command line.
@@ -151,11 +250,10 @@ def main(argv: list[str] | None = None) -> int:
 	persisted = Config.load(config_path)
 	config = apply_overrides(copy.deepcopy(persisted), args)
 
-	logging.basicConfig(level=getattr(logging, config.log_level, logging.INFO),
-	                    format="%(asctime)s %(levelname)-7s %(name)s: %(message)s", datefmt="%H:%M:%S")
-
-	if args.scan:
-		return run_scan()
+	if already_serving(config.bind_address, config.alpaca_port):
+		log.error("another instance is already serving on port %d -- nothing to do",
+		          config.alpaca_port)
+		return None
 
 	# Write the file version out, so the generated unique_id survives and a first run
 	# leaves an editable file behind.
@@ -187,22 +285,40 @@ def main(argv: list[str] | None = None) -> int:
 		responder = DiscoveryServer(config.alpaca_port)
 		responder.start()
 
-	log.info("serving Alpaca on http://%s:%d/  (setup page at /setup)", config.bind_address, config.alpaca_port, )
-	if args.simulate:
-		log.warning("serving a SIMULATED mount; no hardware is being controlled")
+	return Service(config, scope, app, responder, simulated=bool(args.simulate))
 
-	try:
-		_serve(app, config.bind_address, config.alpaca_port)
-	except KeyboardInterrupt:  # pragma: no cover - interactive
-		log.info("stopping")
-	finally:
-		if responder is not None:
-			responder.stop()
-		try:
-			scope.connected = False
-		except Exception:  # pragma: no cover - shutdown must not raise
-			pass
+
+def run_autostart(action: str) -> int:
+	"""--autostart on|off|status, so the toggle is not tray-only."""
+	from . import autostart
+
+	if not autostart.supported():
+		print("Starting at login is a Windows feature. On Linux use a systemd user unit, "
+		      "on macOS a launch agent.")
+		return 1
+	if action == "on":
+		autostart.enable()
+	elif action == "off":
+		autostart.disable()
+	print(f"Start at login: {autostart.describe()}")
 	return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+	args = build_parser().parse_args(argv)
+
+	persisted = Config.load(args.config or default_config_path())
+	configure_logging(apply_overrides(copy.deepcopy(persisted), args))
+
+	if args.scan:
+		return run_scan()
+	if args.autostart:
+		return run_autostart(args.autostart)
+
+	service = build_service(args)
+	if service is None:
+		return 1
+	return service.run()
 
 
 def _serve(app, host: str, port: int) -> None:

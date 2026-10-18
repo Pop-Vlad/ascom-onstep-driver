@@ -114,6 +114,7 @@ class MountState:
 			return self.sidereal_time
 		elapsed = time.monotonic() - self.sidereal_time_at
 		return (self.sidereal_time + elapsed * SIDEREAL_HOURS_PER_HOUR / 3600.0) % 24.0
+
 	"""``time.monotonic()`` when the fast group finished. The motion latch compares against
 	this, so it must mean "status is at least this fresh"."""
 
@@ -289,7 +290,7 @@ class MountLink:
 			raise request.error
 		return request.results
 
-	def pulse_guide(self, direction: int, duration_ms: int,limit_ms: int = protocol.MAX_PULSE_GUIDE_MS) -> None:
+	def pulse_guide(self, direction: int, duration_ms: int, limit_ms: int = protocol.MAX_PULSE_GUIDE_MS) -> None:
 		"""Issue a guide pulse and start the local ``IsPulseGuiding`` clock."""
 		cmd = protocol.pulse_guide(direction, duration_ms, limit_ms)
 		self.execute(cmd)

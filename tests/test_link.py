@@ -471,7 +471,7 @@ def test_a_command_interrupts_the_poll_cycle():
 			done.set()
 
 		threading.Thread(target=refresh, daemon=True).start()
-		wait_until(lambda: any(c == ":GU#" for c in sim.log))   # the cycle has started
+		wait_until(lambda: any(c == ":GU#" for c in sim.log))  # the cycle has started
 		link.execute(p.pulse_guide(0, 200))
 		assert done.wait(10), "the refresh never completed"
 
@@ -480,7 +480,7 @@ def test_a_command_interrupts_the_poll_cycle():
 		after = [c for c in log[pulse + 1:]]
 		assert after, "the pulse was served after the whole cycle, not inside it"
 		assert any(c in (":GRa#", ":GDe#", ":GA#", ":GZ#", ":GS#") for c in after), (
-			"expected cycle reads after the pulse, got %r" % (after,))
+				"expected cycle reads after the pulse, got %r" % (after,))
 	finally:
 		link.disconnect()
 

@@ -5,3 +5,8 @@ __pycache__/
 .idea/
 *.log
 onstep_alpaca.toml
+
+# Packaging artefacts: `pip install -e .`, and PyInstaller and Inno Setup output
+*.egg-info/
+build/
+dist/

@@ -68,6 +68,9 @@ class Config:
 	"""ASCOM wants an elevation; OnStep has nowhere to store one."""
 
 	log_level: str = "INFO"
+	log_file: str = ""
+	"""Where to write the log as well as the console. Empty means console only -- but a
+	windowless launch (the tray icon) has no console, so it fills this in."""
 
 	def __post_init__(self):
 		if not self.unique_id:

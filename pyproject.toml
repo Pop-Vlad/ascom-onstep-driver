@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "onstep-alpaca"
+version = "0.1.0"
+description = "ASCOM Alpaca telescope driver for OnStep and OnStepX mounts"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+dependencies = [
+    "flask>=3.0",
+    "waitress>=3.0",
+    "pyserial>=3.5",
+]
+
+[project.optional-dependencies]
+tray = ["pystray>=0.19", "pillow>=10"]
+
+[project.scripts]
+onstep-alpaca = "onstep_alpaca.__main__:main"
+
+[project.gui-scripts]
+# gui-scripts builds a pythonw launcher, so the tray app opens no console window.
+onstep-alpaca-tray = "onstep_alpaca.tray:main"
+
+[tool.setuptools]
+packages = ["onstep_alpaca"]

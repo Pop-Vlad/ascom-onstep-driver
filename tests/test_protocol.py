@@ -372,7 +372,7 @@ def test_the_highest_defined_fields_still_decode():
 	status = p.parse_status("nNPHaEo::?")
 	assert status.pulse_guide_rate_index == 10
 	assert status.guide_rate_index == 10
-	assert status.general_error == 15      # ERR_NV_INIT
+	assert status.general_error == 15  # ERR_NV_INIT
 
 
 def test_a_genuinely_unreadable_tail_is_still_rejected():
