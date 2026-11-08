@@ -216,6 +216,7 @@ class Telescope:
 	def _disconnect(self) -> None:
 		link, self._link = self._link, None
 		if link is not None:
+			log.info("telescope disconnecting")
 			self._stop_motion_before_close(link)
 			try:
 				link.disconnect()

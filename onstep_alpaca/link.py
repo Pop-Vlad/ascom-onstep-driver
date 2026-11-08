@@ -509,7 +509,12 @@ class MountLink:
 		return info
 
 	def _optional(self, cmd: Cmd) -> str | None:
-		"""Read a value the firmware build may not implement."""
+		"""Read a value the firmware build may not implement.
+
+		Capped at the probe timeout: some builds ignore an unimplemented :GX index
+		entirely (10.23a sends nothing for :GXE1#), and a full 2 s wait per read pushes
+		connect past the ASCOM dynamic client's ~5 s timeout for setting Connected."""
+		cmd = replace(cmd, timeout=min(cmd.timeout, transport.PROBE_TIMEOUT))
 		try:
 			reply = self._raw_exchange(cmd)
 		except (TransportError, ProtocolError) as exc:

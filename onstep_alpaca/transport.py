@@ -168,17 +168,21 @@ class Transport(abc.ABC):
 					if byte == 0x23:  # '#'
 						return buf.decode("ascii", "replace")
 					buf.append(byte)
-				# A lone '0' might still be the start of "0#", so start the clock
-				# rather than deciding now. Anything longer cannot be a refusal.
+				# A lone digit might still be the start of "0#" or "60#", so start the
+				# clock rather than deciding now. Anything longer is a terminated reply.
 				grace_until = (
 					time.monotonic() + OPTIONAL_FAILURE_GRACE
-					if bytes(buf) == b"0"
+					if len(buf) == 1 and chr(buf[0]).isdigit()
 					else None
 				)
 				continue
 			if grace_until is not None and time.monotonic() >= grace_until:
-				log.debug("%s: %s refused (bare 0)", self.name, cmd.text)
-				return None
+				if bytes(buf) == b"0":
+					log.debug("%s: %s refused (bare 0)", self.name, cmd.text)
+					return None
+				# OnStepX 10.x answers :GXEE# with a bare, unterminated digit (numeric
+				# reply framing); waiting for a '#' that never comes cost 2 s per connect.
+				return buf.decode("ascii", "replace")
 			if len(buf) > 128:
 				raise ProtocolError(f"{cmd.text} reply exceeded 128 bytes with no terminator")
 

@@ -24,8 +24,6 @@ Download `OnStepAlpaca-Setup-<version>.exe` from the
 [releases page](https://github.com/Pop-Vlad/ascom-onstep-driver/releases) and run it.
 To uninstall, remove it from Apps & features like anything else.
 
-It is not code-signed, so SmartScreen will warn you the first time. Choose **More info**, then **Run anyway**.
-
 ### From source
 
 ```sh

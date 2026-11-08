@@ -251,6 +251,47 @@ def test_a_refused_optional_read_costs_far_less_than_a_full_timeout(link):
 	assert elapsed >= t.OPTIONAL_FAILURE_GRACE
 
 
+def _like_onstepx_10_23(sim):
+	"""Reproduce two replies measured on a real 10.23a: :GXEE# answers a bare,
+	unterminated digit and :GXE1# gets no answer at all."""
+	original = sim._get_extended
+
+	def extended(index):
+		if index == "EE":
+			return str(sim.coordinate_mode).encode("ascii")
+		if index == "E1":
+			return b""
+		return original(index)
+
+	sim._get_extended = extended
+	return sim
+
+
+def test_optional_read_accepts_a_bare_unterminated_digit(sim):
+	_like_onstepx_10_23(sim)
+	with SimulatedTransport(sim) as link:
+		started = time.monotonic()
+		assert link.exchange(p.GET_COORDINATE_MODE) == "1"
+		assert time.monotonic() - started < 0.5
+
+
+def test_connect_fits_inside_the_ascom_dynamic_client_timeout(sim):
+	"""NINA, via the ASCOM Alpaca dynamic client, gives Connected=true about 5 s. A 10.23a
+	took 4.4 s inside MountLink.connect alone, two full timeouts, so NINA always gave up."""
+	from onstep_alpaca.link import MountLink
+
+	mount = MountLink(SimulatedTransport(_like_onstepx_10_23(sim)), poll_interval=0.05)
+	started = time.monotonic()
+	mount.connect()
+	try:
+		elapsed = time.monotonic() - started
+		assert elapsed < 1.5, f"connect took {elapsed:.2f}s"
+		assert mount.info.coordinate_mode is p.CoordinateMode.TOPOCENTRIC
+		assert mount.info.max_rate_ms is None
+	finally:
+		mount.disconnect()
+
+
 def test_a_fork_mount_connects_without_paying_for_its_missing_gem_options():
 	"""A non-GEM build legitimately refuses the GEM-only reads, and that must not make
 	connecting slow."""
